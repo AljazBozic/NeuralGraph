@@ -121,7 +121,7 @@ If you find our work useful in your research, please consider citing:
 Some other related works on non-rigid reconstruction by our group:
 * [Bozic et al. DeepDeform: Learning Non-rigid RGB-D Reconstruction with Semi-supervised Data (2020)](https://niessnerlab.org/projects/bozic2020deepdeform.html)
 * [Li et al. Learning to Optimize Non-Rigid Tracking (2020)](https://niessnerlab.org/projects/li2020learning.html)
-* [Bozic et al. Learning to Optimize Non-Rigid Tracking (2021)](https://www.niessnerlab.org/projects/bozic2020nnrt.html)
+* [Bozic et al. Neural Non-Rigid Tracking (2020)](https://www.niessnerlab.org/projects/bozic2020nnrt.html)
 
 
 ## License
