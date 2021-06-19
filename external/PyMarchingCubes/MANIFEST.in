@@ -1,0 +1,16 @@
+include marching_cubes/*.py
+exclude marching_cubes/numpy_smoothing.py
+
+include marching_cubes/src/*.h
+include marching_cubes/src/*.cpp
+include marching_cubes/src/_mcubes.pyx
+exclude marching_cubes/src/_mcubes.cpp
+
+include examples/*.py
+include images/binary.jpg
+include images/smooth.jpg
+include images/smoothing.png
+
+include setup.py
+include README.rst
+include LICENSE
