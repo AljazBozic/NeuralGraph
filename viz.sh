@@ -16,7 +16,7 @@ EDGE_WEIGHT_THRESHOLD=0.05
 GT_DATA_DIR="out/dataset/doozy"
 
 # Model
-# CHECKPOINT_PATH="out/experiments/doozy_graph/checkpoints/00510000_model.pt"
+# CHECKPOINT_PATH="out/experiments/doozy_graph/checkpoints/00530000_model.pt"
 # CHECKPOINT_PATH="out/experiments/doozy_shape/checkpoints/00430000_model.pt"
 CHECKPOINT_PATH="out/models/doozy_checkpoint.pt"
 
@@ -30,6 +30,6 @@ python viz.py   --checkpoint_path ${CHECKPOINT_PATH} \
                 --grid_num_chunks ${GRID_NUM_CHUNKS} \
                 --num_neighbors ${NUM_NEIGHBORS} \
                 --edge_weight_threshold ${EDGE_WEIGHT_THRESHOLD} \
+                --viz_dense_tracking \
                 # --viz_only_graph \
-
                           

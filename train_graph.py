@@ -11,6 +11,7 @@ import signal
 import math
 import json
 from timeit import default_timer as timer
+import numpy as np
 
 import config as cfg
 from dataset.dataset import MeshDataset as Dataset
@@ -25,7 +26,14 @@ from node_sampler.evaluate import evaluate
 
 def main():
     torch.set_num_threads(cfg.num_threads)
+    
+    # Make execution deterministic.
+    seed = 42
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     # Parse command line arguments.
     parser = argparse.ArgumentParser()
@@ -34,10 +42,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Train set on which to actually train
+    # Train set on which to actually train.
     data = args.data
 
-    # Experiment
+    # Experiment.
     experiment_name = args.experiment
 
     if cfg.initialize_from_other:
@@ -46,7 +54,7 @@ def main():
         print("Will train from scratch")
     print()
 
-    # Print hyperparameters
+    # Print hyperparameters.
     cfg.print_hyperparams(data, experiment_name)
 
     print()

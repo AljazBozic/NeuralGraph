@@ -27,7 +27,7 @@ from utils.pcd_utils import (BBox,
 from utils.viz_utils import (visualize_grid, visualize_mesh, Colors, merge_line_sets, merge_meshes)
 from utils.sdf_utils import (sample_grid_points, scale_grid)
 from utils.line_mesh import LineMesh
-from nnutils.node_proc import convert_embedding_to_explicit_params, compute_inverse_occupancy, sample_rbf_surface
+from nnutils.node_proc import convert_embedding_to_explicit_params, compute_inverse_occupancy, sample_rbf_surface, sample_rbf_weights
 from utils.parser_utils import check_non_negative, check_positive
 from nnutils.geometry import augment_grid
 
@@ -40,7 +40,7 @@ from multi_sdf.model import MultiSDF
 
 class Viewer:
     def __init__(self, checkpoint_path, time_inc=1, gt_data_dir=None, \
-                grid_dim=128, grid_num_chunks=256, num_neighbors=1, edge_weight_threshold=0.0, viz_only_graph=False):
+                grid_dim=128, grid_num_chunks=256, num_neighbors=1, edge_weight_threshold=0.0, viz_only_graph=False, viz_dense_tracking=True):
         self.time = 0
         self.time_inc = time_inc
         self.obj_mesh = None
@@ -55,6 +55,7 @@ class Viewer:
         self.viz_edges = num_neighbors > 0
         self.edge_weight_threshold = edge_weight_threshold
         self.viz_only_graph = viz_only_graph
+        self.viz_dense_tracking = viz_dense_tracking
 
         self.initialize(checkpoint_path, gt_data_dir)
 
@@ -130,14 +131,12 @@ class Viewer:
             # Load groundtruth mesh.
             orig2world = np.reshape(np.loadtxt(f'{gt_data_path}/orig_to_gaps.txt'), [4, 4]) 
             world2orig = np.linalg.inv(orig2world)
-            
+
             gt_mesh = o3d.io.read_triangle_mesh(f'{gt_data_path}/mesh_orig.ply')
             gt_mesh.transform(orig2world)
             gt_mesh.compute_vertex_normals()
             gt_mesh.paint_uniform_color([0.5, 0.0, 0.0])
 
-            # Transform to OpenGL coordinates
-            # gt_mesh = rotate_around_axis(gt_mesh, axis_name="x", angle=-np.pi) 
             self.gt_meshes.append(gt_mesh)
 
             # Load data from directory.
@@ -444,6 +443,8 @@ class Viewer:
 
         self.node_meshes = []
         self.edge_meshes = []
+        graph_nodes = []
+
         for i in tqdm(range(len(embeddings))):
             # Compute explicit parameters.
             rotated2gaps_i = torch.from_numpy(self.rotated2gaps_array[i]).cuda().unsqueeze(0)
@@ -454,6 +455,14 @@ class Viewer:
                 self.viz_edges = True
             else:
                 self.viz_edges = False
+
+            # Store graph nodes for dense tracking visualization later.
+            graph_nodes.append({
+                "constants": constants.cpu().numpy(),
+                "scales": scales.cpu().numpy(),
+                "rotations": rotations.cpu().numpy(),
+                "centers": centers.cpu().numpy()
+            })
 
             # Generate sphere meshes.
             sphere_meshes = []
@@ -491,7 +500,6 @@ class Viewer:
 
             # Merge sphere meshes.
             merged_spheres = merge_line_sets(sphere_meshes)
-            # merged_spheres = rotate_around_axis(merged_spheres, axis_name="x", angle=-np.pi) 
 
             self.node_meshes.append(merged_spheres)
 
@@ -521,9 +529,6 @@ class Viewer:
                 if len(edge_coords) > 0: 
                     line_mesh = LineMesh(points, edge_coords, radius=0.005)
                     line_meshes = merge_meshes(line_mesh.get_line_meshes())
-
-                    # Transform to OpenGL coordinates
-                    # line_meshes = rotate_around_axis(line_meshes, axis_name="x", angle=-np.pi) 
 
                     self.edge_meshes.append(line_meshes)
                 
@@ -588,9 +593,6 @@ class Viewer:
                         # Convert extracted surface to o3d mesh.
                         mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vertices), o3d.utility.Vector3iVector(triangles))
                         mesh.compute_vertex_normals()
-
-                        # Transform to OpenGL coordinates
-                        # mesh = rotate_around_axis(mesh, axis_name="x", angle=-np.pi) 
                     else:
                         print("No mesh vertices are extracted!")
                         mesh = None #o3d.geometry.TriangleMesh.create_sphere(radius=0.5)
@@ -603,6 +605,102 @@ class Viewer:
 
             for gt_mesh in self.gt_meshes:
                 self.obj_meshes.append(copy.deepcopy(gt_mesh))
+
+        ###############################################################################################
+        # Generate vertex colors.
+        ###############################################################################################
+        if self.viz_dense_tracking:
+            print("Visualizing dense tracking by computing colors in canonical space ...")
+
+            num_chunks = 5
+
+            constants_canonical = torch.from_numpy(graph_nodes[0]["constants"]).cuda()
+            scales_canonical = torch.from_numpy(graph_nodes[0]["scales"]).cuda()
+            rotations_canonical = torch.from_numpy(graph_nodes[0]["rotations"]).cuda()
+            centers_canonical = torch.from_numpy(graph_nodes[0]["centers"]).cuda()
+            
+            for k in tqdm(range(len(time_steps))):
+                mesh_k = copy.deepcopy(self.obj_meshes[k])
+                
+                vertices_k = np.asarray(mesh_k.vertices)
+                faces_k = np.asarray(mesh_k.triangles)
+
+                num_vertices = vertices_k.shape[0]
+                max_points_per_chunk = int(math.ceil(float(num_vertices) / num_chunks))
+
+                constants_k = torch.from_numpy(graph_nodes[k]["constants"]).cuda()
+                scales_k = torch.from_numpy(graph_nodes[k]["scales"]).cuda()
+                rotations_k = torch.from_numpy(graph_nodes[k]["rotations"]).cuda()
+                centers_k = torch.from_numpy(graph_nodes[k]["centers"]).cuda()
+
+                # Compute vertices transformed to from canonical to current space.
+                transformed_vertices = np.empty((num_vertices, 3), dtype=np.float32)
+
+                with torch.no_grad():
+                    # Compute skinning weights.
+                    skinning_weights_k = np.empty((num_vertices, cfg.num_nodes), dtype=np.float32)
+
+                    idx_offset = 0
+                    for i in range(num_chunks):
+                        points_per_chunk = min(max_points_per_chunk, num_vertices - idx_offset)
+                        points_i = torch.from_numpy(vertices_k[idx_offset:idx_offset + points_per_chunk, :]).cuda().float()
+                        points_i = points_i.view(1, points_per_chunk, 3)
+                        
+                        # Compute skinning weights.
+                        weights_i = sample_rbf_weights(points_i, constants_k, scales_k, centers_k, cfg.use_constants) # (1, num_points, num_nodes)
+
+                        ### WEIGHT NORMALIZATION
+                        # We normalize them to sum up to 1.
+                        weights_sum = weights_i.sum(dim=2, keepdim=True)
+                        weights_i = weights_i.div(weights_sum)
+
+                        skinning_weights_k[idx_offset:idx_offset+points_per_chunk, :] = weights_i.cpu().numpy()
+
+                        idx_offset += points_per_chunk
+                        
+                    # Use current pose estimates to transform the points to the canonical space.
+                    R_canonical = rotations_canonical.view(cfg.num_nodes, 3, 3)
+                    R_current = rotations_k.view(cfg.num_nodes, 3, 3)
+
+                    # Compute relative frame-to-frame rotation and translation estimates.
+                    t_canonical = centers_canonical
+                    t_current = centers_k
+
+                    R_current_inv = R_current.permute(0, 2, 1)
+                    R_rel = torch.matmul(R_canonical, R_current_inv)    # (num_nodes, 3, 3)
+
+                    idx_offset = 0
+                    for i in range(num_chunks):
+                        points_per_chunk = min(max_points_per_chunk, num_vertices - idx_offset)
+                        points_i = torch.from_numpy(vertices_k[idx_offset:idx_offset + points_per_chunk, :]).cuda().float()
+                        points_i = points_i.view(1, points_per_chunk, 3)
+                        
+                        # Get corresponding skinning weights.
+                        weights_i = torch.from_numpy(skinning_weights_k[idx_offset:idx_offset+points_per_chunk, :]).cuda()
+
+                        # Apply deformation to canonical vertices.
+                        t_canonical_exp = t_canonical.view(1, cfg.num_nodes, 3, 1).expand(points_per_chunk, -1, -1, -1)         # (points_per_chunk, num_nodes, 3, 1)
+                        t_current_exp = t_current.view(1, cfg.num_nodes, 3, 1).expand(points_per_chunk, -1, -1, -1)             # (points_per_chunk, num_nodes, 3, 1)
+                        R_rel_exp = R_rel.view(1, cfg.num_nodes, 3, 3).expand(points_per_chunk, -1, -1, -1)                     # (points_per_chunk, num_nodes, 3, 3)
+                        points_i = points_i.view(points_per_chunk, 1, 3, 1).expand(-1, cfg.num_nodes, -1, -1)                   # (points_per_chunk, num_nodes, 3, 1)
+                        weights_i = weights_i.view(points_per_chunk, cfg.num_nodes, 1, 1).expand(-1, -1, 3, -1)                 # (points_per_chunk, num_nodes, 3, 1)
+
+                        transformed_points_i = torch.matmul(R_rel_exp, (points_i - t_current_exp)) + t_canonical_exp            # (points_per_chunk, num_nodes, 3, 1)
+                        transformed_points_i = torch.sum(weights_i * transformed_points_i, dim=1).view(points_per_chunk, 3) 
+            
+                        # Store canonical vertex positions.
+                        transformed_vertices[idx_offset:idx_offset+points_per_chunk, :] = transformed_points_i.cpu().numpy()
+
+                        idx_offset += points_per_chunk
+                
+                # Color the vertices depending on their positions in canonical space.
+                grid_size = 0.7
+                scale = 2.0
+                vertex_colors = (scale * transformed_vertices + grid_size) / (2 * grid_size)
+                vertex_colors = np.clip(vertex_colors, 0.0, 1.0)
+                
+                self.obj_meshes[k].vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
+
 
     def _update_obj(self, vis):
         param = vis.get_view_control().convert_to_pinhole_camera_parameters()
@@ -755,6 +853,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_neighbors', type=check_non_negative, help='Number of visualized graph neighbors')
     parser.add_argument('--edge_weight_threshold', type=float, help='Graph edge weight threshold')
     parser.add_argument('--viz_only_graph', action='store_true', help='Specify if you want to visualize only graph (much faster)')
+    parser.add_argument('--viz_dense_tracking', action='store_true', help='Specify if you want to color reconstructed meshes by estimated dense motion')
  
     args = parser.parse_args()
     
@@ -763,7 +862,7 @@ if __name__ == "__main__":
         time_inc=args.time_inc, gt_data_dir=args.gt_data_dir, 
         grid_dim=args.grid_dim, grid_num_chunks=args.grid_num_chunks,
         num_neighbors=args.num_neighbors, edge_weight_threshold=args.edge_weight_threshold,
-        viz_only_graph=args.viz_only_graph
+        viz_only_graph=args.viz_only_graph, viz_dense_tracking=args.viz_dense_tracking
     )
     viewer.run()
     
